@@ -5,7 +5,16 @@ import (
 	"encoding/base64"
 	"io/ioutil"
 	"net/http"
+	"strings"
+
+	glg "github.com/cention-sany/log"
 )
+
+var lg glg.IFLogger = glg.NoLog()
+
+func SetPkgLog(l glg.IFLogger) {
+	lg = l
+}
 
 //Negotiator is a http.Roundtripper decorator that automatically
 //converts basic authentication to NTLM/Negotiate authentication when appropriate.
@@ -62,7 +71,6 @@ func (l Negotiator) RoundTrip(req *http.Request) (res *http.Response, err error)
 			if err != nil {
 				return nil, err
 			}
-
 			// send negotiate
 			negotiateMessage := NewNegotiateMessage()
 			req.Header.Set("Authorization", "Negotiate "+base64.StdEncoding.EncodeToString(negotiateMessage))
@@ -72,7 +80,6 @@ func (l Negotiator) RoundTrip(req *http.Request) (res *http.Response, err error)
 			if err != nil {
 				return nil, err
 			}
-
 			// receive challenge?
 			resauth = authheader(res.Header.Get("Www-Authenticate"))
 			challengeMessage, err := resauth.GetData()
@@ -80,11 +87,31 @@ func (l Negotiator) RoundTrip(req *http.Request) (res *http.Response, err error)
 				return nil, err
 			}
 			if !resauth.IsNegotiate() || len(challengeMessage) == 0 {
-				// Negotiation failed, let client deal with response
+				var hasBasic bool
+				as := res.Header["Www-Authenticate"]
+				for _, s := range as {
+					if strings.HasPrefix(strings.ToLower(s), "basic") {
+						hasBasic = true
+						break
+					} else {
+						//lg.Println("debug: non-basic string:", s)
+					}
+				}
+				if hasBasic {
+					//lg.Println("debug: Negotiation failed retry with basic authentication")
+					res.Body.Close()
+					req.Header.Set("Authorization", string(reqauth))
+					req.Body = ioutil.NopCloser(bytes.NewReader(body.Bytes()))
+
+					res, err = l.RoundTripper.RoundTrip(req)
+					if err != nil {
+						return nil, err
+					}
+				}
+				// Negotiation failed, let client deal with response OR retried with basic authentication
 				return res, nil
 			}
 			res.Body.Close()
-
 			// send authenticate
 			authenticateMessage, err := ProcessChallenge(challengeMessage, u, p)
 			if err != nil {
